@@ -210,22 +210,24 @@ jobs:
       - name: Create launcher + README
         shell: pwsh
         run: |
-          $bat = @'
-@echo off
-setlocal
-set DIR=%~dp0
-"%DIR%..\python\python.exe" -m __ENTRY__ %*
-'@
-          $bat = $bat.Replace('__ENTRY__', $env:ENTRYPOINT_MODULE)
-          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'run.bat') -Value $bat -Encoding Ascii
+          # Build run.bat as lines to avoid YAML here-strings
+          $batLines = @(
+            '@echo off',
+            'setlocal',
+            'set DIR=%~dp0',
+            '"%DIR%..\python\python.exe" -m ' + $env:ENTRYPOINT_MODULE + ' %*'
+          )
+          $batContent = ($batLines -join "`r`n")
+          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'run.bat') -Value $batContent -Encoding Ascii
 
-          $readme = @"
-$env:APP_NAME $env:VERSION
-
-Double-click `run.bat` to start.
-No install. No internet required.
-"@
-          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'README.txt') -Value $readme -Encoding UTF8
+          $readmeLines = @(
+            "$($env:APP_NAME) $($env:VERSION)",
+            '',
+            'Double-click `run.bat` to start.',
+            'No install. No internet required.'
+          )
+          $readmeContent = ($readmeLines -join "`r`n")
+          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'README.txt') -Value $readmeContent -Encoding UTF8
 
       - name: Package artifact
         shell: pwsh
