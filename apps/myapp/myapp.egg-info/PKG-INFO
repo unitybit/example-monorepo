@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: myapp
+Version: 1.0.0
+Summary: Demo monorepo app for Windows portable packaging via GitHub Actions
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: rich<14,>=13.0.0
+
+# MyApp (demo)
+A tiny example app to exercise the Windows-only self-contained packaging workflow.
+
+Run locally (with uv):
+```bash
+uv venv
+uv sync
+uv run myapp
+```

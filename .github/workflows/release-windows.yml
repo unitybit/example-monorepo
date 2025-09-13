@@ -1,0 +1,175 @@
+name: Release (Windows, monorepo, prerelease)
+
+on:
+  push:
+    tags:
+      - "myapp-v*"
+      # Add more per-app tag patterns as needed:
+      # - "tools-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write    # required to create/attach GitHub Releases
+
+env:
+  # PAT with read access to your private dependency repos (fine-grained is best).
+  # Save it as a repo/org secret named GH_PAT.
+  GIT_AUTH_TOKEN: ${{ secrets.GH_PAT }}
+
+  # Portable Python 3.12 for Windows x86_64 (python-build-standalone).
+  # Replace with a different 3.12 asset if you prefer, but keep it 3.12 for reproducibility.
+  PBS_URL: https://github.com/astral-sh/python-build-standalone/releases/download/20250902/cpython-3.12.7%2B20250902-x86_64-pc-windows-msvc-pgo%2Blto-full.zip
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag → APP and VERSION
+        id: parse
+        shell: pwsh
+        run: |
+          $tag = "${env:GITHUB_REF_NAME}"   # e.g. myapp-v1.2.3
+          if ($tag -notmatch '^([A-Za-z0-9_\-]+)-v(.+)$') {
+            Write-Error "Tag must look like <app>-v<version>, got: $tag"
+          }
+          "APP=$($Matches[1])"     >> $env:GITHUB_ENV
+          "VERSION=$($Matches[2])" >> $env:GITHUB_ENV
+          Write-Host "APP=$($Matches[1]) VERSION=$($Matches[2])"
+
+      - name: Map APP → subdir and entrypoint
+        id: map
+        shell: pwsh
+        run: |
+          switch ($env:APP) {
+            "myapp" {
+              "APP_PATH=apps\myapp"             >> $env:GITHUB_ENV
+              "ENTRYPOINT_MODULE=app"            >> $env:GITHUB_ENV   # python -m app
+              "APP_NAME=MyApp"                   >> $env:GITHUB_ENV
+            }
+            # Add more apps here as needed:
+            # "tools" {
+            #   "APP_PATH=tools\cli"             >> $env:GITHUB_ENV
+            #   "ENTRYPOINT_MODULE=toolcli"      >> $env:GITHUB_ENV
+            #   "APP_NAME=ToolsCLI"              >> $env:GITHUB_ENV
+            # }
+            default {
+              Write-Error "Unknown APP '$($env:APP)'. Add it to the switch map."
+            }
+          }
+          Write-Host "Building $env:APP from $env:APP_PATH"
+
+      - name: Setup uv (for exporting from uv.lock)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Prepare bundle layout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+          New-Item -ItemType Directory -Force -Path "bundle\$env:APP_NAME" | Out-Null
+
+      - name: Download portable Python 3.12 (python-build-standalone)
+        shell: pwsh
+        run: |
+          $outfile = "python-runtime.zip"
+          Invoke-WebRequest -Uri "$env:PBS_URL" -OutFile $outfile
+          Expand-Archive -Path $outfile -DestinationPath bundle
+          # Normalize to bundle\python\
+          $dir = Get-ChildItem -Directory bundle | Where-Object { $_.Name -ne $env:APP_NAME } | Select-Object -First 1
+          Move-Item $dir.FullName "bundle\python"
+
+      - name: Copy app sources from monorepo
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -Force "$env:APP_PATH\app" "bundle\$env:APP_NAME\app"
+          if (Test-Path "$env:APP_PATH\pyproject.toml")   { Copy-Item "$env:APP_PATH\pyproject.toml"   "bundle\$env:APP_NAME\" }
+          if (Test-Path "$env:APP_PATH\uv.lock")          { Copy-Item "$env:APP_PATH\uv.lock"          "bundle\$env:APP_NAME\" }
+          if (Test-Path "$env:APP_PATH\requirements.txt") { Copy-Item "$env:APP_PATH\requirements.txt" "bundle\$env:APP_NAME\"" }
+
+      # Prefer uv.lock → export pinned requirements (deterministic)
+      - name: Export pinned requirements from uv.lock (preferred)
+        if: hashFiles('${{ env.APP_PATH }}/uv.lock') != ''
+        shell: pwsh
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          uv export --frozen --no-hashes --format requirements-txt > requirements.lock.txt
+          Copy-Item requirements.lock.txt "$env:GITHUB_WORKSPACE\bundle\$env:APP_NAME\"
+
+      # Configure auth for private GitHub git deps
+      - name: Configure auth for private Git deps (HTTPS + PAT)
+        if: env.GIT_AUTH_TOKEN != ''
+        shell: pwsh
+        run: |
+          git config --global url."https://${env:GIT_AUTH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global advice.detachedHead false
+
+      - name: Install app + deps into bundled runtime (prefers lock)
+        shell: pwsh
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          $PY = "$env:GITHUB_WORKSPACE\bundle\python\python.exe"
+          & $PY -m pip install --upgrade pip
+          if (Test-Path "requirements.lock.txt") {
+            & $PY -m pip install -r requirements.lock.txt
+            & $PY -m pip install .
+          } elseif (Test-Path "pyproject.toml") {
+            & $PY -m pip install .
+          } elseif (Test-Path "requirements.txt") {
+            & $PY -m pip install -r requirements.txt
+          } else {
+            Write-Host "No pyproject.toml / requirements found; skipping dependency install."
+          }
+
+      - name: Clear Git auth rewrite
+        if: env.GIT_AUTH_TOKEN != ''
+        shell: pwsh
+        run: |
+          git config --global --unset-all url."https://${env:GIT_AUTH_TOKEN}@github.com/".insteadOf
+
+      - name: Create launcher and README
+        shell: pwsh
+        run: |
+          @"
+@echo off
+setlocal
+set DIR=%~dp0
+"%DIR%..\python\python.exe" -m %ENTRYPOINT_MODULE% %*
+"@ | Out-File -FilePath "bundle\$env:APP_NAME\run.bat" -Encoding ASCII
+
+          @"
+$env:APP_NAME $env:VERSION
+
+Double-click `run.bat` to start.
+No install. No internet required.
+"@ | Out-File -FilePath "bundle\$env:APP_NAME\README.txt" -Encoding UTF8
+
+      - name: Zip artifact
+        id: zip
+        shell: pwsh
+        run: |
+          $zip = "bundle\$env:APP_NAME-$env:VERSION-windows.zip"
+          Compress-Archive -Path "bundle\$env:APP_NAME","bundle\python" -DestinationPath $zip
+          "ZIP_PATH=$zip" >> $env:GITHUB_ENV
+          Write-Host "Created $zip"
+
+      - name: Upload artifact (Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.VERSION }}-windows
+          path: ${{ env.ZIP_PATH }}
+
+      - name: Create GitHub Release (marked as prerelease)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_PATH }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.APP_NAME }} ${{ env.VERSION }}
+          prerelease: true
+          generate_release_notes: true

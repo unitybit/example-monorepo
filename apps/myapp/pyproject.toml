@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myapp"
+version = "1.0.0"
+description = "Demo monorepo app for Windows portable packaging via GitHub Actions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "rich>=13.0.0,<14"
+]
+
+[project.scripts]
+myapp = "app.__main__:main"
