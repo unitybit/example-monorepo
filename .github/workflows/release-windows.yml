@@ -11,10 +11,10 @@ jobs:
   release:
     runs-on: windows-latest
     env:
-      # Defaults (overridden per-app in the mapping step)
+      # Defaults (overridden in the mapping step)
       APP_NAME: App
       ENTRYPOINT_MODULE: app
-      CPYTHON_SERIES: "3.12"   # choose 3.12 or 3.13, etc.
+      CPYTHON_SERIES: "3.12"   # choose 3.12 or 3.13
 
     steps:
       - name: Checkout
@@ -128,15 +128,11 @@ jobs:
         run: |
           $dest = Join-Path $PWD 'bundle\python'
           $candidates = Get-ChildItem -Directory 'bundle' | Where-Object { $_.Name -ne $env:APP_NAME }
-
           if (-not $candidates -or $candidates.Count -eq 0) {
             throw "No directories found under bundle after extraction."
           }
-
-          # Prefer a folder that already contains python.exe
           $runtime = $candidates | Where-Object { Test-Path (Join-Path $_.FullName 'python.exe') } | Select-Object -First 1
           if (-not $runtime) { $runtime = $candidates | Select-Object -First 1 }
-
           $src = $runtime.FullName
 
           if (Test-Path $dest) {
@@ -170,16 +166,9 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item -Recurse -Force (Join-Path $env:APP_PATH 'app') (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'app')
-
-          if (Test-Path (Join-Path $env:APP_PATH 'pyproject.toml')) {
-            Copy-Item (Join-Path $env:APP_PATH 'pyproject.toml') (Join-Path 'bundle' $env:APP_NAME)
-          }
-          if (Test-Path (Join-Path $env:APP_PATH 'uv.lock')) {
-            Copy-Item (Join-Path $env:APP_PATH 'uv.lock') (Join-Path 'bundle' $env:APP_NAME)
-          }
-          if (Test-Path (Join-Path $env:APP_PATH 'requirements.txt')) {
-            Copy-Item (Join-Path $env:APP_PATH 'requirements.txt') (Join-Path 'bundle' $env:APP_NAME)
-          }
+          if (Test-Path (Join-Path $env:APP_PATH 'pyproject.toml')) { Copy-Item (Join-Path $env:APP_PATH 'pyproject.toml') (Join-Path 'bundle' $env:APP_NAME) }
+          if (Test-Path (Join-Path $env:APP_PATH 'uv.lock'))        { Copy-Item (Join-Path $env:APP_PATH 'uv.lock')        (Join-Path 'bundle' $env:APP_NAME) }
+          if (Test-Path (Join-Path $env:APP_PATH 'requirements.txt')){ Copy-Item (Join-Path $env:APP_PATH 'requirements.txt') (Join-Path 'bundle' $env:APP_NAME) }
 
       - name: Export pinned requirements from uv.lock (if present)
         if: ${{ hashFiles(format('{0}/uv.lock', env.APP_PATH)) != '' }}
@@ -207,18 +196,18 @@ jobs:
             Write-Host "No pyproject.toml / requirements found; skipping dependency install."
           }
 
-      - name: Create launcher + README
+      - name: Create launcher + README at top level
         shell: pwsh
         run: |
-          # Build run.bat as lines to avoid YAML here-strings
+          # Write run.bat at bundle root; it expects python\python.exe next to it
           $batLines = @(
             '@echo off',
             'setlocal',
             'set DIR=%~dp0',
-            '"%DIR%..\python\python.exe" -m ' + $env:ENTRYPOINT_MODULE + ' %*'
+            '"%DIR%python\python.exe" -m ' + $env:ENTRYPOINT_MODULE + ' %*'
           )
           $batContent = ($batLines -join "`r`n")
-          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'run.bat') -Value $batContent -Encoding Ascii
+          Set-Content -Path (Join-Path 'bundle' 'run.bat') -Value $batContent -Encoding Ascii
 
           $readmeLines = @(
             "$($env:APP_NAME) $($env:VERSION)",
@@ -227,14 +216,14 @@ jobs:
             'No install. No internet required.'
           )
           $readmeContent = ($readmeLines -join "`r`n")
-          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'README.txt') -Value $readmeContent -Encoding UTF8
+          Set-Content -Path (Join-Path 'bundle' 'README.txt') -Value $readmeContent -Encoding UTF8
 
-      - name: Package artifact
+      - name: Package artifact (zip contents of bundle/)
         shell: pwsh
         run: |
           $zip = (Join-Path 'bundle' ("$env:APP_NAME-$env:VERSION-windows.zip"))
           if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path (Join-Path 'bundle' $env:APP_NAME), (Join-Path 'bundle' 'python') -DestinationPath $zip
+          Compress-Archive -Path (Join-Path 'bundle' '*') -DestinationPath $zip
           Write-Host "Created $zip"
 
       - name: Upload artifact
