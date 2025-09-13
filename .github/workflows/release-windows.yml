@@ -78,41 +78,66 @@ jobs:
       - name: Download portable Python (python-build-standalone)
         shell: pwsh
         env:
-          # Choose your major/minor (e.g. 3.12 or 3.13). Empty = take newest.
-          CPYTHON_SERIES: "3.12"
+          CPYTHON_SERIES: "3.12"          
+          GITHUB_TOKEN: ${{ github.token }}  
         run: |
           $headers = @{
             "Accept" = "application/vnd.github+json"
             "X-GitHub-Api-Version" = "2022-11-28"
-          }
-          if ($env:GITHUB_TOKEN) { $headers.Authorization = "Bearer $env:GITHUB_TOKEN" }
-
-          # Get the latest PBS release JSON
-          $rel = Invoke-RestMethod -Headers $headers `
-            -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
-
-          # Pick a Windows x86_64 shared build, preferably pgo+lto "full"
-          $series = [regex]::Escape($env:CPYTHON_SERIES)
-          $pattern = if ($series) {
-            "cpython-$series(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*(?:pgo\+lto).*\.zip$"
-          } else {
-            "cpython-3\.\d+(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*(?:pgo\+lto).*\.zip$"
+            "Authorization" = "Bearer $env:GITHUB_TOKEN"
           }
 
-          $asset = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
-          if (-not $asset) {
-            Write-Host "No matching asset found; falling back to any windows-msvc-shared zip"
-            $asset = $rel.assets | Where-Object { $_.name -match "x86_64-pc-windows-msvc-shared.*\.zip$" } | Select-Object -First 1
-          }
-          if (-not $asset) { throw "Could not locate a Windows shared asset in the latest PBS release." }
+          function Find-PBSAsset {
+            param($series)
+            # page through the 10 most recent releases
+            for ($page=1; $page -le 5; $page++) {
+              $rels = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5&page=$page"
+              foreach ($rel in $rels) {
+                # Prefer zip (easier on Windows); match series if provided
+                $zipPattern = if ($series) {
+                  "cpython-$([regex]::Escape($series))(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.zip$"
+                } else {
+                  "cpython-3\.\d+(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.zip$"
+                }
+                $asset = $rel.assets | Where-Object { $_.name -match $zipPattern } | Select-Object -First 1
+                if ($asset) { return $asset }
 
-          $url = $asset.browser_download_url
+                # Fallback to .tar.zst (install-only/full) if no zip is present
+                $zstPattern = if ($series) {
+                  "cpython-$([regex]::Escape($series))(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.tar\.zst$"
+                } else {
+                  "cpython-3\.\d+(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.tar\.zst$"
+                }
+                $asset = $rel.assets | Where-Object { $_.name -match $zstPattern } | Select-Object -First 1
+                if ($asset) { return $asset }
+              }
+            }
+            return $null
+          }
+
+          $asset = Find-PBSAsset -series $env:CPYTHON_SERIES
+          if (-not $asset) { throw "Could not find a Windows 'msvc-shared' asset in recent PBS releases." }
+
           Write-Host "Downloading $($asset.name)"
-          Invoke-WebRequest -Uri $url -OutFile "python-runtime.zip"
+          $outfile = "python-runtime.$(($asset.name -like '*.zip') ? 'zip' : 'tar.zst')"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $outfile
 
-          Expand-Archive -Path "python-runtime.zip" -DestinationPath bundle
-          # Normalize unpacked dir to bundle\python
+          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+
+          if ($outfile -like "*.zip") {
+            Expand-Archive -Path $outfile -DestinationPath bundle
+          } else {
+            # .tar.zst fallback: use 7-Zip available via Chocolatey
+            choco install 7zip -y | Out-Null
+            & "C:\Program Files\7-Zip\7z.exe" x $outfile -obundle -y | Out-Null    # -> .tar
+            $tarFile = Get-ChildItem bundle *.tar | Select-Object -First 1
+            & "C:\Program Files\7-Zip\7z.exe" x $tarFile.FullName -obundle -y | Out-Null
+            Remove-Item $tarFile.FullName
+          }
+
+          # Normalize: move the unpacked runtime dir to bundle\python
           $dir = Get-ChildItem -Directory bundle | Where-Object { $_.Name -ne $env:APP_NAME } | Select-Object -First 1
+          if (-not $dir) { throw "Unpacked runtime directory not found." }
           Move-Item $dir.FullName "bundle\python"
 
 
