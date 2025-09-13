@@ -156,6 +156,18 @@ jobs:
             Write-Host "Python runtime already normalized."
           }
 
+      - name: Locate python.exe (export PYTHON_EXE)
+        shell: pwsh
+        run: |
+          $py = Get-ChildItem -Path "bundle" -Filter python.exe -Recurse -File | Select-Object -First 1
+          if (-not $py) {
+            Write-Host "Bundle contents:"
+            Get-ChildItem -Recurse -Depth 3 bundle | ForEach-Object { $_.FullName }
+            throw "python.exe not found anywhere under bundle/"
+          }
+          "PYTHON_EXE=$($py.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Using Python: $($py.FullName)"
+
       - name: Copy app sources from monorepo subdir
         shell: pwsh
         run: |
@@ -184,7 +196,8 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_PATH }}
         run: |
-          $PY = "$env:GITHUB_WORKSPACE\bundle\python\python.exe"
+          $PY = "$env:PYTHON_EXE"
+          if (-not (Test-Path $PY)) { throw "PYTHON_EXE not found at $PY" }
           & $PY -m pip install --upgrade pip
           if (Test-Path "requirements.lock.txt") {
             & $PY -m pip install -r requirements.lock.txt
@@ -196,6 +209,7 @@ jobs:
           } else {
             Write-Host "No pyproject.toml / requirements found; skipping dependency install."
           }
+
 
       - name: Create launcher + README
         shell: pwsh
