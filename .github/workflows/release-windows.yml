@@ -159,10 +159,18 @@ jobs:
       - name: Copy app sources from monorepo subdir
         shell: pwsh
         run: |
-          Copy-Item -Recurse -Force "$env:APP_PATH\app" "bundle\$env:APP_NAME\app"
-          if (Test-Path "$env:APP_PATH\pyproject.toml")   { Copy-Item "$env:APP_PATH\pyproject.toml"   "bundle\$env:APP_NAME\" }
-          if (Test-Path "$env:APP_PATH\uv.lock")          { Copy-Item "$env:APP_PATH\uv.lock"          "bundle\$env:APP_NAME\" }
-          if (Test-Path "$env:APP_PATH\requirements.txt") { Copy-Item "$env:APP_PATH\requirements.txt" "bundle\$env:APP_NAME\"" }
+          Copy-Item -Recurse -Force (Join-Path $env:APP_PATH 'app') (Join-Path "bundle\$env:APP_NAME" 'app')
+
+          if (Test-Path (Join-Path $env:APP_PATH 'pyproject.toml')) {
+            Copy-Item (Join-Path $env:APP_PATH 'pyproject.toml') "bundle\$env:APP_NAME\"
+          }
+          if (Test-Path (Join-Path $env:APP_PATH 'uv.lock')) {
+            Copy-Item (Join-Path $env:APP_PATH 'uv.lock') "bundle\$env:APP_NAME\"
+          }
+          if (Test-Path (Join-Path $env:APP_PATH 'requirements.txt')) {
+            Copy-Item (Join-Path $env:APP_PATH 'requirements.txt') "bundle\$env:APP_NAME\"
+          }
+
 
       - name: Export pinned requirements from uv.lock (if present)
         if: ${{ hashFiles(format('{0}/uv.lock', env.APP_PATH)) != '' }}
