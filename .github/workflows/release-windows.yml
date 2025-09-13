@@ -1,28 +1,20 @@
-name: Release (Windows, monorepo, prerelease)
+name: Release (Windows, per-app tag)
 
 on:
   push:
     tags:
       - "myapp-v*"
-      # Add more per-app tag patterns as needed:
-      # - "tools-v*"
+      - "tools-v*"
   workflow_dispatch:
-
-permissions:
-  contents: write    # required to create/attach GitHub Releases
-
-env:
-  # PAT with read access to your private dependency repos (fine-grained is best).
-  # Save it as a repo/org secret named GH_PAT.
-  GIT_AUTH_TOKEN: ${{ secrets.GH_PAT }}
-
-  # Portable Python 3.12 for Windows x86_64 (python-build-standalone).
-  # Replace with a different 3.12 asset if you prefer, but keep it 3.12 for reproducibility.
-  PBS_URL: https://github.com/astral-sh/python-build-standalone/releases/download/20250902/cpython-3.12.7%2B20250902-x86_64-pc-windows-msvc-pgo%2Blto-full.zip
 
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      # Defaults (overridden per-app in the mapping step)
+      APP_NAME: App
+      ENTRYPOINT_MODULE: app
+      CPYTHON_SERIES: "3.12"
 
     steps:
       - name: Checkout
@@ -30,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Parse tag → APP and VERSION
+      - name: Parse tag -> APP and VERSION
         id: parse
         shell: pwsh
         run: |
@@ -42,29 +34,28 @@ jobs:
           "VERSION=$($Matches[2])" >> $env:GITHUB_ENV
           Write-Host "APP=$($Matches[1]) VERSION=$($Matches[2])"
 
-      - name: Map APP → subdir and entrypoint
+      - name: Map APP -> subdirectory and entrypoint
         id: map
         shell: pwsh
         run: |
           switch ($env:APP) {
             "myapp" {
-              "APP_PATH=apps\myapp"             >> $env:GITHUB_ENV
-              "ENTRYPOINT_MODULE=app"            >> $env:GITHUB_ENV   # python -m app
-              "APP_NAME=MyApp"                   >> $env:GITHUB_ENV
+              "APP_PATH=apps\myapp"       >> $env:GITHUB_ENV
+              "ENTRYPOINT_MODULE=myapp"    >> $env:GITHUB_ENV  # python -m myapp
+              "APP_NAME=MyApp"             >> $env:GITHUB_ENV
             }
-            # Add more apps here as needed:
-            # "tools" {
-            #   "APP_PATH=tools\cli"             >> $env:GITHUB_ENV
-            #   "ENTRYPOINT_MODULE=toolcli"      >> $env:GITHUB_ENV
-            #   "APP_NAME=ToolsCLI"              >> $env:GITHUB_ENV
-            # }
+            "tools" {
+              "APP_PATH=tools\cli"         >> $env:GITHUB_ENV
+              "ENTRYPOINT_MODULE=toolcli"  >> $env:GITHUB_ENV
+              "APP_NAME=ToolsCLI"          >> $env:GITHUB_ENV
+            }
             default {
               Write-Error "Unknown APP '$($env:APP)'. Add it to the switch map."
             }
           }
-          Write-Host "Building $env:APP from $env:APP_PATH"
+          Write-Host "Building $env:APP in $env:APP_PATH"
 
-      - name: Setup uv (for exporting from uv.lock)
+      - name: Setup uv (optional)
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -78,8 +69,7 @@ jobs:
       - name: Download portable Python (python-build-standalone)
         shell: pwsh
         env:
-          CPYTHON_SERIES: "3.12"          
-          GITHUB_TOKEN: ${{ github.token }}  
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # use Actions' token
         run: |
           $headers = @{
             "Accept" = "application/vnd.github+json"
@@ -89,11 +79,9 @@ jobs:
 
           function Find-PBSAsset {
             param($series)
-            # page through the 10 most recent releases
             for ($page=1; $page -le 5; $page++) {
               $rels = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5&page=$page"
               foreach ($rel in $rels) {
-                # Prefer zip (easier on Windows); match series if provided
                 $zipPattern = if ($series) {
                   "cpython-$([regex]::Escape($series))(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.zip$"
                 } else {
@@ -102,7 +90,6 @@ jobs:
                 $asset = $rel.assets | Where-Object { $_.name -match $zipPattern } | Select-Object -First 1
                 if ($asset) { return $asset }
 
-                # Fallback to .tar.zst (install-only/full) if no zip is present
                 $zstPattern = if ($series) {
                   "cpython-$([regex]::Escape($series))(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*\.tar\.zst$"
                 } else {
@@ -118,30 +105,58 @@ jobs:
           $asset = Find-PBSAsset -series $env:CPYTHON_SERIES
           if (-not $asset) { throw "Could not find a Windows 'msvc-shared' asset in recent PBS releases." }
 
-          Write-Host "Downloading $($asset.name)"
-          $outfile = "python-runtime.$(($asset.name -like '*.zip') ? 'zip' : 'tar.zst')"
+          $outfile = if ($asset.name -like '*.zip') { 'python-runtime.zip' } else { 'python-runtime.tar.zst' }
+          Write-Host "Downloading $($asset.name) -> $outfile"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $outfile
 
-          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+          # Clean any stale runtime folder
+          if (Test-Path "bundle\python") { Remove-Item "bundle\python" -Recurse -Force }
 
+          # Extract
           if ($outfile -like "*.zip") {
             Expand-Archive -Path $outfile -DestinationPath bundle
           } else {
-            # .tar.zst fallback: use 7-Zip available via Chocolatey
             choco install 7zip -y | Out-Null
-            & "C:\Program Files\7-Zip\7z.exe" x $outfile -obundle -y | Out-Null    # -> .tar
+            & "C:\Program Files\7-Zip\7z.exe" x $outfile -obundle -y | Out-Null   # -> .tar
             $tarFile = Get-ChildItem bundle *.tar | Select-Object -First 1
             & "C:\Program Files\7-Zip\7z.exe" x $tarFile.FullName -obundle -y | Out-Null
             Remove-Item $tarFile.FullName
           }
 
-          # Normalize: move the unpacked runtime dir to bundle\python
-          $dir = Get-ChildItem -Directory bundle | Where-Object { $_.Name -ne $env:APP_NAME } | Select-Object -First 1
-          if (-not $dir) { throw "Unpacked runtime directory not found." }
-          Move-Item $dir.FullName "bundle\python"
+      - name: Normalize runtime folder to bundle\python
+        shell: pwsh
+        run: |
+          $dest = Join-Path $PWD 'bundle\python'
+          $candidates = Get-ChildItem -Directory 'bundle' | Where-Object { $_.Name -ne $env:APP_NAME }
 
+          if (-not $candidates -or $candidates.Count -eq 0) {
+            throw "No directories found under bundle after extraction."
+          }
 
-      - name: Copy app sources from monorepo
+          # Prefer a folder that already contains python.exe
+          $runtime = $candidates | Where-Object { Test-Path (Join-Path $_.FullName 'python.exe') } | Select-Object -First 1
+          if (-not $runtime) { $runtime = $candidates | Select-Object -First 1 }
+
+          $src = $runtime.FullName
+
+          if (Test-Path $dest) {
+            # If it's the same path, nothing to do
+            if ((Resolve-Path $src).Path -eq (Resolve-Path $dest).Path) {
+              Write-Host "Python runtime already at bundle\python, skipping move."
+              exit 0
+            }
+            # Otherwise, clear the destination
+            Remove-Item $dest -Recurse -Force
+          }
+
+          if ((Resolve-Path $src).Path -ne (Resolve-Path $dest).Path) {
+            Move-Item $src $dest
+            Write-Host "Moved runtime: $src -> $dest"
+          } else {
+            Write-Host "Python runtime already normalized."
+          }
+
+      - name: Copy app sources from monorepo subdir
         shell: pwsh
         run: |
           Copy-Item -Recurse -Force "$env:APP_PATH\app" "bundle\$env:APP_NAME\app"
@@ -149,24 +164,15 @@ jobs:
           if (Test-Path "$env:APP_PATH\uv.lock")          { Copy-Item "$env:APP_PATH\uv.lock"          "bundle\$env:APP_NAME\" }
           if (Test-Path "$env:APP_PATH\requirements.txt") { Copy-Item "$env:APP_PATH\requirements.txt" "bundle\$env:APP_NAME\"" }
 
-      # Prefer uv.lock → export pinned requirements (deterministic)
-      - name: Export pinned requirements from uv.lock (preferred)
-        if: hashFiles('${{ env.APP_PATH }}/uv.lock') != ''
+      - name: Export pinned requirements from uv.lock (if present)
+        if: ${{ hashFiles(format('{0}/uv.lock', env.APP_PATH)) != '' }}
         shell: pwsh
         working-directory: ${{ env.APP_PATH }}
         run: |
           uv export --frozen --no-hashes --format requirements-txt > requirements.lock.txt
           Copy-Item requirements.lock.txt "$env:GITHUB_WORKSPACE\bundle\$env:APP_NAME\"
 
-      # Configure auth for private GitHub git deps
-      - name: Configure auth for private Git deps (HTTPS + PAT)
-        if: env.GIT_AUTH_TOKEN != ''
-        shell: pwsh
-        run: |
-          git config --global url."https://${env:GIT_AUTH_TOKEN}@github.com/".insteadOf "https://github.com/"
-          git config --global advice.detachedHead false
-
-      - name: Install app + deps into bundled runtime (prefers lock)
+      - name: Install app + deps into the bundled runtime
         shell: pwsh
         working-directory: ${{ env.APP_PATH }}
         run: |
@@ -183,12 +189,6 @@ jobs:
             Write-Host "No pyproject.toml / requirements found; skipping dependency install."
           }
 
-      - name: Clear Git auth rewrite
-        if: env.GIT_AUTH_TOKEN != ''
-        shell: pwsh
-        run: |
-          git config --global --unset-all url."https://${env:GIT_AUTH_TOKEN}@github.com/".insteadOf
-
       - name: Create launcher + README
         shell: pwsh
         run: |
@@ -199,27 +199,20 @@ jobs:
           $readme = "$env:APP_NAME $env:VERSION`n`nDouble-click `run.bat` to start.`nNo install. No internet required.`n"
           Set-Content -Path "bundle\$env:APP_NAME\README.txt" -Value $readme -Encoding UTF8
 
-
-      - name: Zip artifact
-        id: zip
+      - name: Package artifact
         shell: pwsh
         run: |
           $zip = "bundle\$env:APP_NAME-$env:VERSION-windows.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "bundle\$env:APP_NAME","bundle\python" -DestinationPath $zip
-          "ZIP_PATH=$zip" >> $env:GITHUB_ENV
           Write-Host "Created $zip"
 
-      - name: Upload artifact (Actions)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-${{ env.VERSION }}-windows
-          path: ${{ env.ZIP_PATH }}
+          path: bundle/${{ env.APP_NAME }}-${{ env.VERSION }}-windows.zip
 
-      - name: Create GitHub Release (marked as prerelease)
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ZIP_PATH }}
-          tag_name: ${{ github.ref_name }}
-          name: ${{ env.APP_NAME }} ${{ env.VERSION }}
-          prerelease: true
-          generate_release_notes: true
+
+
+      
