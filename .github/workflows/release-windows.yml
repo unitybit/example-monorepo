@@ -14,7 +14,7 @@ jobs:
       # Defaults (overridden per-app in the mapping step)
       APP_NAME: App
       ENTRYPOINT_MODULE: app
-      CPYTHON_SERIES: "3.12"
+      CPYTHON_SERIES: "3.12"   # choose 3.12 or 3.13, etc.
 
     steps:
       - name: Checkout
@@ -53,7 +53,7 @@ jobs:
               Write-Error "Unknown APP '$($env:APP)'. Add it to the switch map."
             }
           }
-          Write-Host "Building $env:APP in $env:APP_PATH"
+          Write-Host "Building $env:APP in $env:APP_PATH with entrypoint $env:ENTRYPOINT_MODULE"
 
       - name: Setup uv (optional)
         uses: astral-sh/setup-uv@v6
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path bundle | Out-Null
-          New-Item -ItemType Directory -Force -Path "bundle\$env:APP_NAME" | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path 'bundle' $env:APP_NAME) | Out-Null
 
       - name: Download portable Python (python-build-standalone)
         shell: pwsh
@@ -140,12 +140,10 @@ jobs:
           $src = $runtime.FullName
 
           if (Test-Path $dest) {
-            # If it's the same path, nothing to do
             if ((Resolve-Path $src).Path -eq (Resolve-Path $dest).Path) {
               Write-Host "Python runtime already at bundle\python, skipping move."
               exit 0
             }
-            # Otherwise, clear the destination
             Remove-Item $dest -Recurse -Force
           }
 
@@ -161,7 +159,7 @@ jobs:
         run: |
           $py = Get-ChildItem -Path "bundle" -Filter python.exe -Recurse -File | Select-Object -First 1
           if (-not $py) {
-            Write-Host "Bundle contents:"
+            Write-Host "Bundle contents (debug):"
             Get-ChildItem -Recurse -Depth 3 bundle | ForEach-Object { $_.FullName }
             throw "python.exe not found anywhere under bundle/"
           }
@@ -171,18 +169,17 @@ jobs:
       - name: Copy app sources from monorepo subdir
         shell: pwsh
         run: |
-          Copy-Item -Recurse -Force (Join-Path $env:APP_PATH 'app') (Join-Path "bundle\$env:APP_NAME" 'app')
+          Copy-Item -Recurse -Force (Join-Path $env:APP_PATH 'app') (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'app')
 
           if (Test-Path (Join-Path $env:APP_PATH 'pyproject.toml')) {
-            Copy-Item (Join-Path $env:APP_PATH 'pyproject.toml') "bundle\$env:APP_NAME\"
+            Copy-Item (Join-Path $env:APP_PATH 'pyproject.toml') (Join-Path 'bundle' $env:APP_NAME)
           }
           if (Test-Path (Join-Path $env:APP_PATH 'uv.lock')) {
-            Copy-Item (Join-Path $env:APP_PATH 'uv.lock') "bundle\$env:APP_NAME\"
+            Copy-Item (Join-Path $env:APP_PATH 'uv.lock') (Join-Path 'bundle' $env:APP_NAME)
           }
           if (Test-Path (Join-Path $env:APP_PATH 'requirements.txt')) {
-            Copy-Item (Join-Path $env:APP_PATH 'requirements.txt') "bundle\$env:APP_NAME\"
+            Copy-Item (Join-Path $env:APP_PATH 'requirements.txt') (Join-Path 'bundle' $env:APP_NAME)
           }
-
 
       - name: Export pinned requirements from uv.lock (if present)
         if: ${{ hashFiles(format('{0}/uv.lock', env.APP_PATH)) != '' }}
@@ -190,7 +187,7 @@ jobs:
         working-directory: ${{ env.APP_PATH }}
         run: |
           uv export --frozen --no-hashes --format requirements-txt > requirements.lock.txt
-          Copy-Item requirements.lock.txt "$env:GITHUB_WORKSPACE\bundle\$env:APP_NAME\"
+          Copy-Item 'requirements.lock.txt' (Join-Path (Join-Path $env:GITHUB_WORKSPACE (Join-Path 'bundle' $env:APP_NAME)) 'requirements.lock.txt')
 
       - name: Install app + deps into the bundled runtime
         shell: pwsh
@@ -200,33 +197,42 @@ jobs:
           if (-not (Test-Path $PY)) { throw "PYTHON_EXE not found at $PY" }
           & $PY -m pip install --upgrade pip
           if (Test-Path "requirements.lock.txt") {
-            & $PY -m pip install -r requirements.lock.txt
+            & $PY -m pip install -r (Join-Path (Join-Path $env:GITHUB_WORKSPACE (Join-Path 'bundle' $env:APP_NAME)) 'requirements.lock.txt')
             & $PY -m pip install .
           } elseif (Test-Path "pyproject.toml") {
             & $PY -m pip install .
           } elseif (Test-Path "requirements.txt") {
-            & $PY -m pip install -r requirements.txt
+            & $PY -m pip install -r "requirements.txt"
           } else {
             Write-Host "No pyproject.toml / requirements found; skipping dependency install."
           }
 
-
       - name: Create launcher + README
         shell: pwsh
         run: |
-          $bat = "@echo off`nsetlocal`nset DIR=%~dp0`n\"%DIR%..\\python\\python.exe\" -m $env:ENTRYPOINT_MODULE %*"
-          New-Item -ItemType Directory -Force -Path "bundle\$env:APP_NAME" | Out-Null
-          Set-Content -Path "bundle\$env:APP_NAME\run.bat" -Value $bat -Encoding Ascii
+          $bat = @'
+@echo off
+setlocal
+set DIR=%~dp0
+"%DIR%..\python\python.exe" -m __ENTRY__ %*
+'@
+          $bat = $bat.Replace('__ENTRY__', $env:ENTRYPOINT_MODULE)
+          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'run.bat') -Value $bat -Encoding Ascii
 
-          $readme = "$env:APP_NAME $env:VERSION`n`nDouble-click `run.bat` to start.`nNo install. No internet required.`n"
-          Set-Content -Path "bundle\$env:APP_NAME\README.txt" -Value $readme -Encoding UTF8
+          $readme = @"
+$env:APP_NAME $env:VERSION
+
+Double-click `run.bat` to start.
+No install. No internet required.
+"@
+          Set-Content -Path (Join-Path (Join-Path 'bundle' $env:APP_NAME) 'README.txt') -Value $readme -Encoding UTF8
 
       - name: Package artifact
         shell: pwsh
         run: |
-          $zip = "bundle\$env:APP_NAME-$env:VERSION-windows.zip"
+          $zip = (Join-Path 'bundle' ("$env:APP_NAME-$env:VERSION-windows.zip"))
           if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path "bundle\$env:APP_NAME","bundle\python" -DestinationPath $zip
+          Compress-Archive -Path (Join-Path 'bundle' $env:APP_NAME), (Join-Path 'bundle' 'python') -DestinationPath $zip
           Write-Host "Created $zip"
 
       - name: Upload artifact
@@ -234,7 +240,3 @@ jobs:
         with:
           name: ${{ env.APP_NAME }}-${{ env.VERSION }}-windows
           path: bundle/${{ env.APP_NAME }}-${{ env.VERSION }}-windows.zip
-
-
-
-      
