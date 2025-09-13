@@ -133,22 +133,16 @@ jobs:
         run: |
           git config --global --unset-all url."https://${env:GIT_AUTH_TOKEN}@github.com/".insteadOf
 
-      - name: Create launcher and README
+      - name: Create launcher + README
         shell: pwsh
         run: |
-          @"
-@echo off
-setlocal
-set DIR=%~dp0
-"%DIR%..\python\python.exe" -m %ENTRYPOINT_MODULE% %*
-"@ | Out-File -FilePath "bundle\$env:APP_NAME\run.bat" -Encoding ASCII
+          $bat = "@echo off`nsetlocal`nset DIR=%~dp0`n\"%DIR%..\\python\\python.exe\" -m $env:ENTRYPOINT_MODULE %*"
+          New-Item -ItemType Directory -Force -Path "bundle\$env:APP_NAME" | Out-Null
+          Set-Content -Path "bundle\$env:APP_NAME\run.bat" -Value $bat -Encoding Ascii
 
-          @"
-$env:APP_NAME $env:VERSION
+          $readme = "$env:APP_NAME $env:VERSION`n`nDouble-click `run.bat` to start.`nNo install. No internet required.`n"
+          Set-Content -Path "bundle\$env:APP_NAME\README.txt" -Value $readme -Encoding UTF8
 
-Double-click `run.bat` to start.
-No install. No internet required.
-"@ | Out-File -FilePath "bundle\$env:APP_NAME\README.txt" -Encoding UTF8
 
       - name: Zip artifact
         id: zip
