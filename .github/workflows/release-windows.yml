@@ -75,15 +75,46 @@ jobs:
           New-Item -ItemType Directory -Force -Path bundle | Out-Null
           New-Item -ItemType Directory -Force -Path "bundle\$env:APP_NAME" | Out-Null
 
-      - name: Download portable Python 3.12 (python-build-standalone)
+      - name: Download portable Python (python-build-standalone)
         shell: pwsh
+        env:
+          # Choose your major/minor (e.g. 3.12 or 3.13). Empty = take newest.
+          CPYTHON_SERIES: "3.12"
         run: |
-          $outfile = "python-runtime.zip"
-          Invoke-WebRequest -Uri "$env:PBS_URL" -OutFile $outfile
-          Expand-Archive -Path $outfile -DestinationPath bundle
-          # Normalize to bundle\python\
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          if ($env:GITHUB_TOKEN) { $headers.Authorization = "Bearer $env:GITHUB_TOKEN" }
+
+          # Get the latest PBS release JSON
+          $rel = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
+
+          # Pick a Windows x86_64 shared build, preferably pgo+lto "full"
+          $series = [regex]::Escape($env:CPYTHON_SERIES)
+          $pattern = if ($series) {
+            "cpython-$series(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*(?:pgo\+lto).*\.zip$"
+          } else {
+            "cpython-3\.\d+(\.\d+)?\+\d{8}-x86_64-pc-windows-msvc-shared-.*(?:pgo\+lto).*\.zip$"
+          }
+
+          $asset = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
+          if (-not $asset) {
+            Write-Host "No matching asset found; falling back to any windows-msvc-shared zip"
+            $asset = $rel.assets | Where-Object { $_.name -match "x86_64-pc-windows-msvc-shared.*\.zip$" } | Select-Object -First 1
+          }
+          if (-not $asset) { throw "Could not locate a Windows shared asset in the latest PBS release." }
+
+          $url = $asset.browser_download_url
+          Write-Host "Downloading $($asset.name)"
+          Invoke-WebRequest -Uri $url -OutFile "python-runtime.zip"
+
+          Expand-Archive -Path "python-runtime.zip" -DestinationPath bundle
+          # Normalize unpacked dir to bundle\python
           $dir = Get-ChildItem -Directory bundle | Where-Object { $_.Name -ne $env:APP_NAME } | Select-Object -First 1
           Move-Item $dir.FullName "bundle\python"
+
 
       - name: Copy app sources from monorepo
         shell: pwsh
