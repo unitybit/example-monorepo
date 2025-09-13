@@ -199,24 +199,42 @@ jobs:
       - name: Create launcher + README at top level
         shell: pwsh
         run: |
-          # Write run.bat at bundle root; it expects python\python.exe next to it
+          $module = $env:ENTRYPOINT_MODULE  # e.g. myapp (must match your importable module name)
           $batLines = @(
             '@echo off',
-            'setlocal',
-            'set DIR=%~dp0',
-            '"%DIR%python\python.exe" -m ' + $env:ENTRYPOINT_MODULE + ' %*'
+            'setlocal enabledelayedexpansion',
+            'set "DIR=%~dp0"',
+            'set "PY="',
+            'set "CAND=%DIR%python\python.exe"',
+            'if exist "!CAND!" set "PY=!CAND!"',
+            'if not defined PY (',
+            '  set "CAND=%DIR%python\install\python.exe"',
+            '  if exist "!CAND!" set "PY=!CAND!"',
+            ')',
+            'if not defined PY (',
+            '  echo Could not find Python runtime next to run.bat.',
+            '  echo Expected at "%DIR%python\python.exe" or "%DIR%python\install\python.exe".',
+            '  exit /b 1',
+            ')',
+            # keep -m and the module ON THE SAME LINE:
+            ('"%PY%" -m ' + $module + ' %*'),
+            'exit /b %errorlevel%'
           )
           $batContent = ($batLines -join "`r`n")
           Set-Content -Path (Join-Path 'bundle' 'run.bat') -Value $batContent -Encoding Ascii
-
+      
           $readmeLines = @(
             "$($env:APP_NAME) $($env:VERSION)",
             '',
-            'Double-click `run.bat` to start.',
+            'Usage:',
+            '  1) Unzip everything into a folder you have write access to',
+            '  2) Double-click run.bat',
+            '',
             'No install. No internet required.'
           )
           $readmeContent = ($readmeLines -join "`r`n")
           Set-Content -Path (Join-Path 'bundle' 'README.txt') -Value $readmeContent -Encoding UTF8
+
 
       - name: Package artifact (zip contents of bundle/)
         shell: pwsh
